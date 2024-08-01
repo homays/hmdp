@@ -14,8 +14,9 @@ import org.springframework.stereotype.Service;
 import javax.annotation.Resource;
 
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 
-import static com.hmdp.utils.RedisConstants.CACHE_SHOP_TYPE_KEY;
+import static com.hmdp.utils.RedisConstants.*;
 
 @Service
 public class ShopTypeServiceImpl extends ServiceImpl<ShopTypeMapper, ShopType> implements IShopTypeService {
@@ -34,7 +35,7 @@ public class ShopTypeServiceImpl extends ServiceImpl<ShopTypeMapper, ShopType> i
         if (CollUtil.isEmpty(shopTypeList)) {
             return Result.fail("未找到商品分类");
         }
-        stringRedisTemplate.opsForValue().set(CACHE_SHOP_TYPE_KEY, JSONUtil.toJsonStr(shopTypeList));
+        stringRedisTemplate.opsForValue().set(CACHE_SHOP_TYPE_KEY, JSONUtil.toJsonStr(shopTypeList), CACHE_SHOP_TYPE_TTL, TimeUnit.MINUTES);
         return Result.ok(shopTypeList);
     }
 }
