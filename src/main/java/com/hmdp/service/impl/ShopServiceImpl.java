@@ -34,9 +34,15 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
             return Result.ok(shop);
         }
 
+        if (cacheShop != null) {
+            return Result.fail("店铺信息不存在");
+        }
+
         Shop shop = getById(id);
 
         if (ObjectUtil.isNull(shop)) {
+            // 如果redis中没有数据，但是数据库也没有数据，为了防止缓存穿透，将空值写入redis
+            stringRedisTemplate.opsForValue().set(CACHE_SHOP_KEY + id, "", CACHE_NULL_TTL, TimeUnit.MINUTES);
             return Result.fail("该店铺不存在");
         }
 
