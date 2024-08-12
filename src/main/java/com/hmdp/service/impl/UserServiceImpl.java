@@ -17,10 +17,13 @@ import com.hmdp.service.IUserService;
 import com.hmdp.utils.RegexUtils;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.core.io.ClassPathResource;
 import org.springframework.data.redis.connection.DataType;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.ZSetOperations;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
+import org.springframework.data.redis.core.script.RedisScript;
+import org.springframework.scripting.support.ResourceScriptSource;
 import org.springframework.stereotype.Service;
 
 import javax.servlet.http.HttpSession;
@@ -34,11 +37,6 @@ import java.util.concurrent.TimeUnit;
 import static com.hmdp.utils.RedisConstants.*;
 import static com.hmdp.utils.SystemConstants.USER_NICK_NAME_PREFIX;
 
-/**
- * <p>
- * 服务实现类
- * </p>
- */
 @Slf4j
 @Service
 public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IUserService {
@@ -73,24 +71,18 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
         long currentTime = System.currentTimeMillis();
 
         // 使用 Lua 脚本来确保原子性操作
-        String luaScript = "local window_start = tonumber(ARGV[1]) - 60000\n" +
-                "redis.call('ZREMRANGEBYSCORE', KEYS[1], 0, window_start)\n" +
-                "local current_requests = redis.call('ZCARD', KEYS[1])\n" +
-                "if current_requests < tonumber(ARGV[2]) then\n" +
-                "    redis.call('ZADD', KEYS[1], ARGV[1], ARGV[1])\n" +
-                "    return 1\n" +
-                "else\n" +
-                "    return 0\n" +
-                "end";
+        DefaultRedisScript<Long> script = new DefaultRedisScript<>();
+        script.setLocation(new ClassPathResource("rate_limit.lua"));
+        script.setResultType(Long.class);
 
-        // 将 Lua 脚本和参数传递给 execute 方法
+        // 将 Lua 脚本和参数传递给 execute 方法，ZADD key score member [score member ...]
         Long result = stringRedisTemplate.execute(
-                new DefaultRedisScript<>(luaScript, Long.class),
+                script,
                 Collections.singletonList(key), // Redis 键
                 String.valueOf(currentTime), // 当前时间戳作为参数
+                code, // 验证码作为值
                 "10" // 最大请求次数
         );
-
         return result == 1;
     }
 
@@ -126,10 +118,18 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
         // 校验验证码
         String code = loginForm.getCode();
         //String redisCode = stringRedisTemplate.opsForValue().get(LOGIN_CODE_KEY + phone);
-        Set<String> range = stringRedisTemplate.opsForZSet().range(LOGIN_CODE_KEY + phone, -1, -1);
+        ZSetOperations<String, String> zSet = stringRedisTemplate.opsForZSet();
+        Set<String> range = zSet.range(LOGIN_CODE_KEY + phone, -1, -1);
         String redisCode = null;
         if (range != null) {
             redisCode = range.iterator().next();
+        }
+        Double score = zSet.score(LOGIN_CODE_KEY + phone, redisCode);
+        // 当前时间戳
+        long currentTime = System.currentTimeMillis();
+        // 过期时间为5分钟
+        if (currentTime - score > 60 * 1000 * 5) {
+            return Result.fail("验证码已过期，请重新获取");
         }
 
         if (!StrUtil.equals(code, redisCode)) {
