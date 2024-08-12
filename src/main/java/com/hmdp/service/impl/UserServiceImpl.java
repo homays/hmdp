@@ -17,13 +17,18 @@ import com.hmdp.service.IUserService;
 import com.hmdp.utils.RegexUtils;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.redis.connection.DataType;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.ZSetOperations;
+import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.stereotype.Service;
 
 import javax.servlet.http.HttpSession;
 import java.time.LocalDateTime;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
 import static com.hmdp.utils.RedisConstants.*;
@@ -52,12 +57,62 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
         String code = RandomUtil.randomNumbers(6);
 
         // 3. 保存验证码到redis中
-        stringRedisTemplate.opsForValue().set(LOGIN_CODE_KEY + phone, code, 3, TimeUnit.MINUTES);
+        //stringRedisTemplate.opsForValue().set(LOGIN_CODE_KEY + phone, code, 3, TimeUnit.MINUTES);
+        if (!allowRequestLua(LOGIN_CODE_KEY + phone, code)) {
+            return Result.fail("请勿重复发送验证码");
+        }
 
         // 4. 发送验证码
-        log.info("发送验证码成功，验证码: {}", code);
+        //log.info("发送验证码成功，验证码: {}", code);
 
         return Result.ok();
+    }
+
+    public boolean allowRequestLua(String key, String code) {
+        // 当前时间戳
+        long currentTime = System.currentTimeMillis();
+
+        // 使用 Lua 脚本来确保原子性操作
+        String luaScript = "local window_start = tonumber(ARGV[1]) - 60000\n" +
+                "redis.call('ZREMRANGEBYSCORE', KEYS[1], 0, window_start)\n" +
+                "local current_requests = redis.call('ZCARD', KEYS[1])\n" +
+                "if current_requests < tonumber(ARGV[2]) then\n" +
+                "    redis.call('ZADD', KEYS[1], ARGV[1], ARGV[1])\n" +
+                "    return 1\n" +
+                "else\n" +
+                "    return 0\n" +
+                "end";
+
+        // 将 Lua 脚本和参数传递给 execute 方法
+        Long result = stringRedisTemplate.execute(
+                new DefaultRedisScript<>(luaScript, Long.class),
+                Collections.singletonList(key), // Redis 键
+                String.valueOf(currentTime), // 当前时间戳作为参数
+                "10" // 最大请求次数
+        );
+
+        return result == 1;
+    }
+
+    public boolean allowRequest(String key, String code) {
+        // 当前时间戳
+        long currentTime = System.currentTimeMillis();
+        // 窗口开始时间是当前时间减 60s
+        long windowStart = currentTime - 60 * 1000;
+
+        // 删除窗口开始时间之前的所有数据
+        stringRedisTemplate.opsForZSet().removeRangeByScore(key, 0L, windowStart);
+
+        // 计算总请求数
+        long currentRequests = stringRedisTemplate.opsForZSet().zCard(key);
+
+        // 窗口足够则把当前请求加入
+        if (currentRequests < 10) {
+            stringRedisTemplate.opsForZSet().add(key, code, currentTime);
+            return true;
+        }
+
+        return false;
     }
 
     @Override
@@ -70,8 +125,14 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
 
         // 校验验证码
         String code = loginForm.getCode();
-        String redisCode = stringRedisTemplate.opsForValue().get(LOGIN_CODE_KEY + phone);
-        if (StrUtil.isBlank(code) && !StrUtil.equals(code, redisCode)) {
+        //String redisCode = stringRedisTemplate.opsForValue().get(LOGIN_CODE_KEY + phone);
+        Set<String> range = stringRedisTemplate.opsForZSet().range(LOGIN_CODE_KEY + phone, -1, -1);
+        String redisCode = null;
+        if (range != null) {
+            redisCode = range.iterator().next();
+        }
+
+        if (!StrUtil.equals(code, redisCode)) {
             return Result.fail("验证码有误");
         }
 
@@ -98,7 +159,7 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
         // 设置token有效期
         stringRedisTemplate.expire(tokenKey, LOGIN_USER_TTL, TimeUnit.MINUTES);
         // 删除redis 中的验证码
-        stringRedisTemplate.delete(LOGIN_CODE_KEY + phone);
+        //stringRedisTemplate.delete(LOGIN_CODE_KEY + phone);
 
         // 返回token
         return Result.ok(token);
